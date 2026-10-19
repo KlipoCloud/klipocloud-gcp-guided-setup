@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+original=("$@")
+
+log_mutation() {
+  {
+    printf 'bq'
+    printf ' %q' "${original[@]}"
+    printf '\n'
+  } >> "${MOCK_STATE_DIR}/commands.log"
+  tail -n 1 "${MOCK_STATE_DIR}/commands.log" >> "${MOCK_STATE_DIR}/mutations.log"
+}
+
+has_argument() {
+  local expected="$1"
+  local argument
+  for argument in "${original[@]}"; do
+    [[ "$argument" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+argument_value() {
+  local prefix="$1"
+  local argument
+  for argument in "${original[@]}"; do
+    [[ "$argument" == "$prefix"* ]] && {
+      printf '%s' "${argument#"$prefix"}"
+      return
+    }
+  done
+  return 1
+}
+
+following_argument() {
+  local expected="$1"
+  local index
+  for ((index = 0; index < ${#original[@]} - 1; index += 1)); do
+    if [[ "${original[$index]}" == "$expected" ]]; then
+      printf '%s' "${original[$((index + 1))]}"
+      return
+    fi
+  done
+  return 1
+}
+
+resource_ref="${original[${#original[@]} - 1]}"
+source_dataset_ref="${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID}"
+source_table_ref="${source_dataset_ref}.gcp_billing_export_resource_v1_${BILLING_ACCOUNT_ID//-/_}"
+view_dataset_ref="${BILLING_QUERY_PROJECT_ID}:${MOCK_VIEW_DATASET_ID}"
+view_ref="${view_dataset_ref}.project_costs"
+
+case "$1" in
+  show)
+    if has_argument --dataset_view=METADATA; then
+      if [[ "$resource_ref" == "$source_dataset_ref" ]]; then
+        jq -n --arg location "$MOCK_BILLING_LOCATION" '{location: $location}'
+      elif [[ "$resource_ref" == "$view_dataset_ref" &&
+        -f "${MOCK_STATE_DIR}/view-dataset-${MOCK_VIEW_DATASET_ID}" ]]; then
+        jq -n --arg location "$MOCK_BILLING_LOCATION" '{location: $location}'
+      else
+        exit 1
+      fi
+    elif has_argument --dataset_view=FULL; then
+      [[ "$resource_ref" == "$source_dataset_ref" ]] || exit 1
+      cat "${MOCK_STATE_DIR}/source-dataset.json"
+    elif [[ "$resource_ref" == "$source_table_ref" ]]; then
+      jq -n --arg project "$BILLING_SOURCE_PROJECT_ID" \
+        --arg dataset "$BILLING_SOURCE_DATASET_ID" \
+        --arg table "${source_table_ref##*.}" '
+        {
+          type: "TABLE",
+          tableReference: {projectId: $project, datasetId: $dataset, tableId: $table}
+        }
+      '
+    elif [[ "$resource_ref" == "$view_ref" &&
+      -f "${MOCK_STATE_DIR}/view-${MOCK_VIEW_DATASET_ID}.json" ]]; then
+      cat "${MOCK_STATE_DIR}/view-${MOCK_VIEW_DATASET_ID}.json"
+    else
+      exit 1
+    fi
+    ;;
+  mk)
+    log_mutation
+    if has_argument --dataset; then
+      : > "${MOCK_STATE_DIR}/view-dataset-${MOCK_VIEW_DATASET_ID}"
+    else
+      query="$(argument_value --view=)"
+      jq -n --arg query "$query" --arg location "$MOCK_BILLING_LOCATION" '
+        {type: "VIEW", location: $location, view: {useLegacySql: false, query: $query}}
+      ' > "${MOCK_STATE_DIR}/view-${MOCK_VIEW_DATASET_ID}.json"
+    fi
+    ;;
+  update)
+    log_mutation
+    if argument_value --view= >/dev/null 2>&1; then
+      query="$(argument_value --view=)"
+      jq -n --arg query "$query" --arg location "$MOCK_BILLING_LOCATION" '
+        {type: "VIEW", location: $location, view: {useLegacySql: false, query: $query}}
+      ' > "${MOCK_STATE_DIR}/view-${MOCK_VIEW_DATASET_ID}.json"
+    else
+      source_file="$(following_argument --source)"
+      cp "$source_file" "${MOCK_STATE_DIR}/source-dataset.json"
+    fi
+    ;;
+  add-iam-policy-binding) log_mutation ;;
+  *)
+    printf 'Unexpected bq mock command:' >&2
+    printf ' %q' "${original[@]}" >&2
+    printf '\n' >&2
+    exit 2
+    ;;
+esac

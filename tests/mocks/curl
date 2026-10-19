@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_file=""
+data_source=""
+endpoint=""
+arguments=("$@")
+stdin_payload="$(cat || true)"
+
+for ((index = 0; index < ${#arguments[@]}; index += 1)); do
+  case "${arguments[$index]}" in
+    --output)
+      index=$((index + 1))
+      output_file="${arguments[$index]}"
+      ;;
+    --data-binary)
+      index=$((index + 1))
+      data_source="${arguments[$index]}"
+      ;;
+    https://*) endpoint="${arguments[$index]}" ;;
+  esac
+done
+
+[[ -n "$output_file" && -n "$endpoint" ]] || exit 2
+
+if [[ "$endpoint" == *"/gcp/setup-context" ]]; then
+  printf '%s' "$stdin_payload" > "${MOCK_STATE_DIR}/setup-context-request.json"
+  jq -n \
+    --arg version "$MOCK_GIT_HEAD" \
+    --arg digest "$MOCK_CONTEXT_ARTIFACT_DIGEST" \
+    --arg binding "$MOCK_BINDING_ID" \
+    --arg tenant "$MOCK_TENANT_ID" \
+    --arg posture "$MOCK_POSTURE" '
+      {
+        schemaVersion: 1,
+        intentId: "10000000-0000-4000-8000-000000000001",
+        connectionBindingId: $binding,
+        publicTenantId: $tenant,
+        issuer: ("https://identity.klipocloud.com/oidc/gcp/tenants/" + $tenant),
+        posture: $posture,
+        environmentLabel: "Production",
+        artifactVersion: $version,
+        artifactDigest: $digest,
+        registrationEndpoint: "https://api.klipocloud.com/api/v1/connections/intents/10000000-0000-4000-8000-000000000001/gcp/register"
+      }
+    ' > "$output_file"
+  printf '200'
+  exit 0
+fi
+
+if [[ "$endpoint" == *":testIamPermissions" ]]; then
+  [[ "$data_source" == @* ]] || exit 2
+  count_file="${MOCK_STATE_DIR}/permission-request-count"
+  count=0
+  [[ ! -f "$count_file" ]] || count="$(< "$count_file")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  jq --arg endpoint "$endpoint" '. + {endpoint: $endpoint}' \
+    "${data_source#@}" > "${MOCK_STATE_DIR}/permission-request-${count}.json"
+  jq '{permissions: .permissions}' "${data_source#@}" > "$output_file"
+  printf '200'
+  exit 0
+fi
+
+if [[ "$endpoint" == *"/gcp/register" ]]; then
+  count_file="${MOCK_STATE_DIR}/registration-count"
+  count=0
+  [[ ! -f "$count_file" ]] || count="$(< "$count_file")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  printf '%s' "$stdin_payload" > "${MOCK_STATE_DIR}/registration-${count}.json"
+  if (( count <= MOCK_REGISTRATION_TRANSPORT_FAILURES )); then
+    exit 7
+  fi
+  printf '{"status":"accepted","bindingVersion":1,"registrySyncStatus":"pending"}' \
+    > "$output_file"
+  printf '%s' "$MOCK_REGISTRATION_HTTP_STATUS"
+  exit 0
+fi
+
+printf 'Unexpected curl mock endpoint: %s\n' "$endpoint" >&2
+exit 2

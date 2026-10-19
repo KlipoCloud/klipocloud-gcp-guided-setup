@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/KlipoCloud/klipocloud-gcp-guided-setup.git",
+  "setupContextEndpoint": "https://api.klipocloud.com/api/v1/connections/gcp/setup-context",
+  "registrationOrigin": "https://api.klipocloud.com",
+  "issuerOrigin": "https://identity.klipocloud.com"
+}

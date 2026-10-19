@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+arguments="$*"
+case "$arguments" in
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$MOCK_REPOSITORY_ROOT" ;;
+  *"rev-parse HEAD"*) printf '%s\n' "$MOCK_GIT_HEAD" ;;
+  *"symbolic-ref --quiet --short HEAD"*) printf '%s\n' "$MOCK_GIT_BRANCH" ;;
+  *"remote get-url origin"*) printf '%s\n' "$MOCK_GIT_ORIGIN" ;;
+  *"status --porcelain --untracked-files=all"*) printf '%s' "$MOCK_GIT_DIRTY" ;;
+  *) printf 'Unexpected git mock command: %s\n' "$arguments" >&2; exit 2 ;;
+esac

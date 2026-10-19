@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+original=("$@")
+
+log_command() {
+  local destination="$1"
+  shift
+  {
+    printf 'gcloud'
+    printf ' %q' "$@"
+    printf '\n'
+  } >> "$destination"
+}
+
+log_mutation() {
+  log_command "${MOCK_STATE_DIR}/commands.log" "${original[@]}"
+  log_command "${MOCK_STATE_DIR}/mutations.log" "${original[@]}"
+}
+
+argument_value() {
+  local prefix="$1"
+  local argument
+  for argument in "${original[@]}"; do
+    [[ "$argument" == "$prefix"* ]] && {
+      printf '%s' "${argument#"$prefix"}"
+      return
+    }
+  done
+  return 1
+}
+
+write_provider_contract() {
+  local provider_id="$1"
+  printf '%s' "$(argument_value --issuer-uri=)" \
+    > "${MOCK_STATE_DIR}/provider-${provider_id}-issuer"
+  printf '%s' "$(argument_value --allowed-audiences=)" \
+    > "${MOCK_STATE_DIR}/provider-${provider_id}-audience"
+  printf '%s' "$(argument_value --attribute-mapping=)" \
+    > "${MOCK_STATE_DIR}/provider-${provider_id}-mapping"
+  printf '%s' "$(argument_value --attribute-condition=)" \
+    > "${MOCK_STATE_DIR}/provider-${provider_id}-condition"
+  printf 'ACTIVE' > "${MOCK_STATE_DIR}/provider-${provider_id}-state"
+}
+
+if [[ "$1" == "auth" && "$2" == "list" ]]; then
+  if [[ "$MOCK_UNAUTHENTICATED" == "0" ||
+    -f "${MOCK_STATE_DIR}/authenticated" ]]; then
+    printf 'operator@example.com\n'
+  fi
+  exit 0
+fi
+
+if [[ "$1" == "auth" && "$2" == "login" ]]; then
+  log_mutation
+  : > "${MOCK_STATE_DIR}/authenticated"
+  exit 0
+fi
+
+if [[ "$1" == "auth" && "$2" == "print-access-token" ]]; then
+  printf 'mock-access-token\n'
+  exit 0
+fi
+
+if [[ "$1" == "config" && "$2" == "get-value" && "$3" == "project" ]]; then
+  printf '%s\n' "$MOCK_TARGET_PROJECT_ID"
+  exit 0
+fi
+
+if [[ "$1" == "projects" && "$2" == "describe" ]]; then
+  printf '%s\n' "$MOCK_TARGET_PROJECT_NUMBER"
+  exit 0
+fi
+
+if [[ "$1" == "projects" && "$2" == "add-iam-policy-binding" ]]; then
+  log_mutation
+  exit 0
+fi
+
+if [[ "$1" == "services" && "$2" == "enable" ]]; then
+  log_mutation
+  exit 0
+fi
+
+if [[ "$1" == "iam" && "$2" == "workload-identity-pools" ]]; then
+  shift 2
+  if [[ "$1" == "list" ]]; then
+    state_file="${MOCK_STATE_DIR}/pool-${MOCK_POOL_ID}-state"
+    if [[ -f "$state_file" ]]; then
+      jq -n --arg id "$MOCK_POOL_ID" --arg state "$(< "$state_file")" \
+        '[{name: ("projects/123/locations/global/workloadIdentityPools/" + $id), state: $state}]'
+    else
+      printf '[]\n'
+    fi
+    exit 0
+  fi
+  if [[ "$1" == "providers" ]]; then
+    shift
+    provider_command="$1"
+    provider_id="${2:-$MOCK_PROVIDER_ID}"
+    state_file="${MOCK_STATE_DIR}/provider-${MOCK_PROVIDER_ID}-state"
+    case "$provider_command" in
+      list)
+        if [[ -f "$state_file" ]]; then
+          jq -n --arg id "$MOCK_PROVIDER_ID" --arg state "$(< "$state_file")" \
+            '[{name: ("projects/123/locations/global/workloadIdentityPools/pool/providers/" + $id), state: $state}]'
+        else
+          printf '[]\n'
+        fi
+        ;;
+      create-oidc|update-oidc)
+        log_mutation
+        write_provider_contract "$provider_id"
+        ;;
+      undelete)
+        log_mutation
+        printf 'ACTIVE' > "${MOCK_STATE_DIR}/provider-${provider_id}-state"
+        ;;
+      describe)
+        issuer="$(< "${MOCK_STATE_DIR}/provider-${provider_id}-issuer")"
+        audience="$(< "${MOCK_STATE_DIR}/provider-${provider_id}-audience")"
+        mapping="$(< "${MOCK_STATE_DIR}/provider-${provider_id}-mapping")"
+        condition="$(< "${MOCK_STATE_DIR}/provider-${provider_id}-condition")"
+        jq -n --arg issuer "$issuer" --arg audience "$audience" \
+          --arg mapping "$mapping" --arg condition "$condition" '
+          {
+            state: "ACTIVE",
+            disabled: false,
+            oidc: {issuerUri: $issuer, allowedAudiences: [$audience]},
+            attributeCondition: $condition,
+            attributeMapping: ($mapping | split(",") | map(split("=")) |
+              map({key: .[0], value: .[1]}) | from_entries)
+          }
+        '
+        ;;
+      *) exit 2 ;;
+    esac
+    exit 0
+  fi
+  pool_command="$1"
+  pool_id="${2:-$MOCK_POOL_ID}"
+  case "$pool_command" in
+    create|update|undelete)
+      log_mutation
+      printf 'ACTIVE' > "${MOCK_STATE_DIR}/pool-${pool_id}-state"
+      ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+
+if [[ "$1" == "iam" && "$2" == "service-accounts" ]]; then
+  command_name="$3"
+  case "$command_name" in
+    describe)
+      [[ -f "${MOCK_STATE_DIR}/service-account-${MOCK_SERVICE_ACCOUNT_EMAIL}" ]] || exit 1
+      printf '%s\n' "$MOCK_SERVICE_ACCOUNT_EMAIL"
+      ;;
+    create)
+      log_mutation
+      : > "${MOCK_STATE_DIR}/service-account-${MOCK_SERVICE_ACCOUNT_EMAIL}"
+      ;;
+    add-iam-policy-binding) log_mutation ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+
+if [[ "$1" == "iam" && "$2" == "roles" ]]; then
+  role_command="$3"
+  role_id="${4:-}"
+  project_id="$(argument_value --project=)"
+  role_file="${MOCK_STATE_DIR}/role-${project_id}-${role_id}"
+  case "$role_command" in
+    describe) [[ -f "$role_file" ]] || exit 1 ;;
+    list) printf '[]\n' ;;
+    create|update|undelete)
+      log_mutation
+      : > "$role_file"
+      ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+
+printf 'Unexpected gcloud mock command:' >&2
+printf ' %q' "${original[@]}" >&2
+printf '\n' >&2
+exit 2
